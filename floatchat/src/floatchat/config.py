@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # Conversation memory
     conversation_max_turns: int = 10
 
+    # NetCDF cache
+    netcdf_cache_ttl_days: int = 7
+
     # LLM / Ollama
     llm_enabled: bool = True
     ollama_base_url: str = "http://localhost:11434"

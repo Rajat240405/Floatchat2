@@ -1,6 +1,7 @@
 """FastAPI application factory.
 
 Uses lifespan events to eagerly load the metadata index at startup.
+Phase 23: Cleans up expired NetCDF cache files on startup.
 """
 
 from contextlib import asynccontextmanager
@@ -22,6 +23,7 @@ from floatchat.exceptions import (
 )
 from floatchat.logging_config import configure_logging
 from floatchat.models import ErrorResponse
+from floatchat.repository_service.gdac_http import cleanup_expired_netcdf_cache
 
 # Mapping of domain exceptions to HTTP status codes.
 _EXCEPTION_STATUS_MAP: dict[type[FloatChatError], int] = {
@@ -49,9 +51,14 @@ def _make_exception_handler(status_code: int):
 async def lifespan(app: FastAPI):
     """Application lifespan handler.
 
-    Loads the metadata index into RAM before serving traffic.
+    Phase 23: Cleans expired NetCDF cache, then loads metadata.
     """
     configure_logging()
+
+    # --- Phase 23: NetCDF cache cleanup ---------------------------------- #
+    cleanup_expired_netcdf_cache()
+
+    # --- Metadata load --------------------------------------------------- #
     metadata = get_metadata_service()
     metadata.load()
     yield

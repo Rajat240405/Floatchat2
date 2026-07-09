@@ -7,6 +7,7 @@ Pandas DataFrame, and provides fast in-memory filtering.
 import gzip
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -101,16 +102,36 @@ class GDACMetadataService(AbstractMetadataService):
     # --------------------------------------------------------------------- #
 
     def load(self) -> None:
-        """Ensure Core and Bio indexes are loaded (Phase 22)."""
+        """Ensure Core and Bio indexes are loaded (Phase 22).
+
+        Phase 23: Measures and logs startup timing for each stage.
+        """
+        t_start = time.perf_counter()
+
         core_missing = not _CORE_CACHE_FILE.exists()
         bio_missing = not _CACHE_FILE.exists()
 
         if not core_missing and not bio_missing and self._is_cache_fresh():
             logger.info("Loading metadata indexes from local cache")
+
+            logger.info("Loading Core metadata ...")
+            t0 = time.perf_counter()
             self._load_from_file(_CORE_CACHE_FILE, is_core=True)
+            t1 = time.perf_counter()
+            logger.info("Core load: %.1f sec", t1 - t0)
+
+            logger.info("Loading Bio metadata ...")
+            t0 = time.perf_counter()
             self._load_from_file(_CACHE_FILE, is_bio=True)
+            t1 = time.perf_counter()
+            logger.info("Bio load: %.1f sec", t1 - t0)
+
             if settings.enable_synthetic_index and _SYNTHETIC_CACHE_FILE.exists():
                 self._load_from_file(_SYNTHETIC_CACHE_FILE, is_synthetic=True)
+
+            t_total = time.perf_counter()
+            logger.info("Metadata total: %.1f sec", t_total - t_start)
+            logger.info("Metadata initialization complete.")
             return
 
         logger.info("Downloading metadata indexes from GDAC ...")
@@ -122,11 +143,25 @@ class GDACMetadataService(AbstractMetadataService):
             self._download_synthetic_index()
 
         if _CORE_CACHE_FILE.exists():
+            logger.info("Loading Core metadata ...")
+            t0 = time.perf_counter()
             self._load_from_file(_CORE_CACHE_FILE, is_core=True)
+            t1 = time.perf_counter()
+            logger.info("Core load: %.1f sec", t1 - t0)
+
         if _CACHE_FILE.exists():
+            logger.info("Loading Bio metadata ...")
+            t0 = time.perf_counter()
             self._load_from_file(_CACHE_FILE, is_bio=True)
+            t1 = time.perf_counter()
+            logger.info("Bio load: %.1f sec", t1 - t0)
+
         if settings.enable_synthetic_index and _SYNTHETIC_CACHE_FILE.exists():
             self._load_from_file(_SYNTHETIC_CACHE_FILE, is_synthetic=True)
+
+        t_total = time.perf_counter()
+        logger.info("Metadata total: %.1f sec", t_total - t_start)
+        logger.info("Metadata initialization complete.")
 
     def search(self, criteria: SearchCriteria) -> list[MetadataRecord]:
         """Filter the in-memory index according to *criteria*."""
@@ -257,18 +292,21 @@ class GDACMetadataService(AbstractMetadataService):
         return [MetadataRecord(**row) for row in df.to_dict("records")]
 
     def is_loaded(self) -> bool:
-        return self._df is not None
+        return self._df is not None or self._core_df is not None
 
     # --------------------------------------------------------------------- #
     # Internals
     # --------------------------------------------------------------------- #
 
     def _is_cache_fresh(self) -> bool:
-        if not _CACHE_FILE.exists():
+        """Return True if both Core and Bio cache files exist and are fresh."""
+        if not _CACHE_FILE.exists() or not _CORE_CACHE_FILE.exists():
             return False
-        mtime = datetime.fromtimestamp(_CACHE_FILE.stat().st_mtime, tz=timezone.utc)
+        now = datetime.now(timezone.utc)
         ttl = timedelta(hours=settings.metadata_cache_ttl_hours)
-        return datetime.now(timezone.utc) - mtime < ttl
+        bio_mtime = datetime.fromtimestamp(_CACHE_FILE.stat().st_mtime, tz=timezone.utc)
+        core_mtime = datetime.fromtimestamp(_CORE_CACHE_FILE.stat().st_mtime, tz=timezone.utc)
+        return (now - bio_mtime) < ttl and (now - core_mtime) < ttl
 
     def _download_core_index(self) -> None:
         """Download the Core (global profile) index."""
@@ -322,6 +360,8 @@ class GDACMetadataService(AbstractMetadataService):
     def _load_from_file(
         self, path: Path, is_core: bool = False, is_bio: bool = False, is_synthetic: bool = False
     ) -> None:
+        label = "Core" if is_core else ("Bio" if is_bio else "metadata")
+        logger.info("Reading CSV ...")
         try:
             df = pd.read_csv(
                 path,
@@ -344,6 +384,7 @@ class GDACMetadataService(AbstractMetadataService):
                 details={"exception": str(exc)},
             ) from exc
 
+        logger.info("Building DataFrame ...")
         df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
         df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
 
@@ -364,11 +405,11 @@ class GDACMetadataService(AbstractMetadataService):
 
         if is_core:
             self._core_df = df
-            logger.info("Loaded Core metadata index: %d rows", len(df))
+            logger.info("Loaded %d rows", len(df))
         elif is_bio:
             self._df = df
             self._last_load = datetime.now(timezone.utc)
-            logger.info("Loaded Bio metadata index: %d rows", len(df))
+            logger.info("Loaded %d rows", len(df))
         elif is_synthetic:
             self._synthetic_df = df
             logger.info("Loaded synthetic metadata index: %d rows", len(df))
@@ -376,4 +417,4 @@ class GDACMetadataService(AbstractMetadataService):
             # Backward compatibility
             self._df = df
             self._last_load = datetime.now(timezone.utc)
-            logger.info("Loaded metadata index: %d rows", len(df))
+            logger.info("Loaded %d rows", len(df))

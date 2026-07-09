@@ -95,10 +95,23 @@ class QueryEngine:
 
         # --- Step 2: Fetch & read NetCDFs --------------------------------- #
         dataframes: list[pd.DataFrame] = []
+        fetched_files: set[str] = set()  # Phase 23: dedup same-file downloads
         for group_records, variables in search_groups:
             for rec in group_records:
                 float_id = _extract_float_id_from_path(rec.file)
+
+                # Phase 23: Skip duplicate file downloads in one request
+                if rec.file in fetched_files:
+                    logger.info("Skipping duplicate fetch: %s", rec.file)
+                    continue
+                fetched_files.add(rec.file)
+
+                t_fetch_t0 = time.perf_counter()
                 ncd = self.repository.fetch(rec.file)
+                t_fetch_t1 = time.perf_counter()
+                logger.info("NetCDF fetch: %.3fs (%s)", t_fetch_t1 - t_fetch_t0, rec.file)
+
+                t_read_t0 = time.perf_counter()
                 try:
                     df = self.reader.read(ncd, variables)
                     # Augment with metadata for downstream use
@@ -113,6 +126,8 @@ class QueryEngine:
                     logger.exception("Failed to read %s; skipping", rec.file)
                 finally:
                     ncd.close()
+                t_read_t1 = time.perf_counter()
+                logger.info("NetCDF read: %.3fs (%s)", t_read_t1 - t_read_t0, rec.file)
 
         t2 = time.perf_counter()
         logger.info("NetCDF fetch+read: %.3fs (%d profiles)", t2 - t1, len(records))
@@ -145,6 +160,7 @@ class QueryEngine:
         logger.info("Total pipeline: %.3fs", t3 - pipeline_t0)
 
         # --- Step 4: Scientific Interpretation + Verification ------------- #
+        t_sci_t0 = time.perf_counter()
         interpretation = generate_plot_interpretation(
             combined, intent.variables, intent.region
         )
@@ -177,6 +193,12 @@ class QueryEngine:
                 "derived_insights": self._calculate_derived_insights(combined, intent.variables),
             }
         )
+
+        t_sci_t1 = time.perf_counter()
+        logger.info("Scientific explanation: %.3fs", t_sci_t1 - t_sci_t0)
+
+        total = time.perf_counter()
+        logger.info("Total request time: %.3fs", total - pipeline_t0)
 
         return ChatResponse(
             intent=intent.intent,
