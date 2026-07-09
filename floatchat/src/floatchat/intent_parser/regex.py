@@ -12,7 +12,12 @@ import re
 
 from floatchat.exceptions import IntentParseError
 from floatchat.intent_parser.base import AbstractIntentParser
+from floatchat.intent_parser.fuzzy import correct_variables_with_fuzzy
 from floatchat.models import ParsedIntent
+from floatchat.query_normalizer import (
+    AbstractQueryNormalizer,
+    FallbackQueryNormalizer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +141,7 @@ _CONVERSATIONAL_VARIABLE = re.compile(
     r"par|photosynthetically active radiation|downwelling par|"
     r"irradiance 380|down irradiance 380|irradiance 412|down irradiance 412|"
     r"irradiance 490|down irradiance 490|"
-    r"temperature|temp|salinity|psal)",
+    r"temperature|temp|salinity|psal|explain)",
     re.IGNORECASE,
 )
 _CONVERSATIONAL_COMPARISON = re.compile(
@@ -181,13 +186,25 @@ _PROFILE_NUMBER_RE = re.compile(
 class RegexIntentParser(AbstractIntentParser):
     """Deterministic parser using regular expressions and synonym tables."""
 
+    def __init__(self, normalizer: AbstractQueryNormalizer | None = None) -> None:
+        # Phase 20.2: Normalization is opt-in to preserve backward compatibility
+        self.normalizer = normalizer  # can be None or explicit instance
+
     def parse(self, message: str) -> ParsedIntent:
         """Parse *message* via regex heuristics."""
         logger.debug("RegexIntentParser processing: %r", message)
+
+        # Phase 20.2: Query Normalization stage (before any parsing)
         text = message.lower()
+        if self.normalizer is not None:
+            normalized = self.normalizer.normalize(message)
+            if normalized != message:
+                logger.info("Original query: %r", message)
+                logger.info("Normalized query: %r", normalized)
+            text = normalized.lower()
 
         intent = self._detect_intent(text)
-        variables = self._extract_variables(text)
+        variables = correct_variables_with_fuzzy(self._extract_variables(text))
         region = self._extract_region(text)
         year = self._extract_year(text)
         float_id = self._extract_float_id(text)

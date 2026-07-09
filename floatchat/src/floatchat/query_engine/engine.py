@@ -19,6 +19,12 @@ from floatchat.models import ChatResponse, MapData, ParsedIntent, SearchCriteria
 from floatchat.netcdf_reader.base import AbstractNetCDFReader
 from floatchat.repository_service.base import AbstractRepositoryService
 from floatchat.visualization_engine.base import AbstractVisualizationEngine
+from floatchat.scientific_explanation.engine import ScientificExplanationEngine
+from floatchat.scientific_explanation.verification import (
+    build_verification_section,
+    build_pipeline_trace,
+)
+from floatchat.scientific_explanation.interpretation import generate_plot_interpretation
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +52,7 @@ class QueryEngine:
         self.repository = repository_service
         self.reader = netcdf_reader
         self.viz = visualization_engine
+        self.explanation_engine = ScientificExplanationEngine()
 
     def execute(self, intent: ParsedIntent) -> ChatResponse:
         """Run the full pipeline for a single parsed intent.
@@ -68,9 +75,10 @@ class QueryEngine:
 
         if not records:
             logger.warning("No metadata records matched criteria: %s", criteria)
+            suggestion = self._get_error_suggestion(intent)
             return ChatResponse(
                 intent=intent.intent,
-                message="No Argo profiles matched your query criteria.",
+                message=f"No Argo profiles matched your query criteria. {suggestion}",
                 data_summary={"matched_records": 0},
             )
 
@@ -127,12 +135,45 @@ class QueryEngine:
         logger.info("Visualization: %.3fs", t3 - t2)
         logger.info("Total pipeline: %.3fs", t3 - pipeline_t0)
 
-        # --- Step 4: Response --------------------------------------------- #
+        # --- Step 4: Scientific Interpretation + Verification ------------- #
+        interpretation = generate_plot_interpretation(
+            combined, intent.variables, intent.region
+        )
+        verification = build_verification_section(
+            intent, records, intent.variables, {}
+        )
+        pipeline_trace = build_pipeline_trace(
+            intent,
+            {
+                "metadata": t1 - t0,
+                "netcdf": t2 - t1,
+                "viz": t3 - t2,
+                "total": t3 - pipeline_t0,
+            },
+            False,
+        )
+
+        base_message = self._build_message(intent, records, combined)
+        explanation = self.explanation_engine.generate_explanation(
+            intent, records, intent.variables, self._build_summary(combined, records)
+        )
+        final_message = f"{base_message} {explanation} {interpretation}"
+
+        data_summary = self._build_summary(combined, records)
+        data_summary.update(
+            {
+                "verification": verification,
+                "pipeline_trace": pipeline_trace,
+                "suggestions": self._generate_suggestions(intent, records),
+                "derived_insights": self._calculate_derived_insights(combined, intent.variables),
+            }
+        )
+
         return ChatResponse(
             intent=intent.intent,
-            message=self._build_message(intent, records, combined),
+            message=final_message,
             figure=figure,
-            data_summary=self._build_summary(combined, records),
+            data_summary=data_summary,
             map_data=map_data,
         )
 
@@ -218,3 +259,60 @@ class QueryEngine:
             },
             "files": [r.file for r in records],
         }
+
+    @staticmethod
+    def _get_error_suggestion(intent: ParsedIntent) -> str:
+        """Return a helpful suggestion when no profiles are found."""
+        if intent.variables and "TEMP" in intent.variables:
+            return "This float may only contain BGC variables. Try requesting DOXY or CHLA instead."
+        if intent.year and intent.year < 2015:
+            return "Try a more recent year (many BGC floats were deployed after 2015)."
+        if intent.region:
+            return "Try broadening the region or removing the year filter."
+        return "Try another year, different region, or a different variable."
+
+    @staticmethod
+    def _generate_suggestions(
+        intent: ParsedIntent, records: list[Any]
+    ) -> list[str]:
+        """Generate context-aware follow-up suggestions (Improvement 7)."""
+        suggestions = []
+        vars_upper = [v.upper() for v in intent.variables]
+
+        if "DOXY" in vars_upper or "DOXY_ADJUSTED" in vars_upper:
+            suggestions.append("Compare with last year")
+            suggestions.append("View chlorophyll")
+        if "CHLA" in vars_upper or "CHLA_ADJUSTED" in vars_upper:
+            suggestions.append("Inspect trajectory")
+        if intent.region:
+            suggestions.append("Show temperature")
+            suggestions.append("Compare another float in same region")
+        if not suggestions:
+            suggestions = ["View oxygen", "Show salinity profile", "Compare with 2023"]
+        return suggestions[:4]
+
+    @staticmethod
+    def _calculate_derived_insights(
+        df: pd.DataFrame, variables: list[str]
+    ) -> dict[str, Any]:
+        """Lightweight derived scientific insights (Improvement 6)."""
+        insights: dict[str, Any] = {}
+        if "PRES" not in df.columns:
+            return insights
+
+        for var in variables:
+            col = f"{var}_ADJUSTED" if f"{var}_ADJUSTED" in df.columns else var
+            if col not in df.columns:
+                continue
+            series = df[col].dropna()
+            if series.empty:
+                continue
+            if var.upper().startswith("DOXY"):
+                min_idx = series.idxmin()
+                insights["min_oxygen_depth_dbar"] = float(df.loc[min_idx, "PRES"])
+            if var.upper().startswith("CHLA"):
+                max_idx = series.idxmax()
+                insights["max_chlorophyll_depth_dbar"] = float(df.loc[max_idx, "PRES"])
+            insights[f"surface_{var.lower()}_avg"] = float(series.iloc[:5].mean())
+            insights[f"qc_passed_{var.lower()}"] = int((df.get(f"{col}_QC", pd.Series([1]*len(df))) == "1").sum())
+        return insights

@@ -87,9 +87,6 @@ class InMemoryConversationManager(AbstractConversationManager):
 
         ctx.turn_count += 1
         ctx.last_intent = intent.intent
-        # Only overwrite data fields when they are explicitly present in the
-        # intent.  This preserves previous context for GENERAL_QUERY turns
-        # (which have empty variables / None region / etc.).
         if intent.float_id is not None:
             ctx.last_float_id = intent.float_id
         if intent.variables:

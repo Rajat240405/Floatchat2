@@ -12,6 +12,8 @@ from floatchat.conversation.base import AbstractConversationManager
 from floatchat.conversation.memory import InMemoryConversationManager
 from floatchat.intent_parser.base import AbstractIntentParser
 from floatchat.intent_parser.regex import RegexIntentParser
+from floatchat.query_normalizer.base import AbstractQueryNormalizer
+from floatchat.query_normalizer.ollama import OllamaQueryNormalizer
 from floatchat.llm_service.base import AbstractLLMService
 from floatchat.llm_service.classifier import QueryClassifier
 from floatchat.llm_service.ollama import OllamaLLMService
@@ -35,6 +37,7 @@ _query_engine: QueryEngine | None = None
 _llm_service: OllamaLLMService | None = None
 _query_classifier: QueryClassifier | None = None
 _conversation_manager: InMemoryConversationManager | None = None
+_query_normalizer: OllamaQueryNormalizer | None = None
 
 
 def get_metadata_service() -> AbstractMetadataService:
@@ -64,11 +67,25 @@ def get_visualization_engine() -> AbstractVisualizationEngine:
         _viz_engine = ProfileVisualizationEngine()
     return _viz_engine
 
+def get_query_normalizer() -> AbstractQueryNormalizer:
+    global _query_normalizer
 
-def get_intent_parser() -> AbstractIntentParser:
+    if _query_normalizer is None:
+        _query_normalizer = OllamaQueryNormalizer()
+
+    return _query_normalizer
+
+def get_intent_parser(
+    normalizer: Annotated[
+        AbstractQueryNormalizer,
+        Depends(get_query_normalizer),
+    ],
+) -> AbstractIntentParser:
     global _intent_parser
     if _intent_parser is None:
-        _intent_parser = RegexIntentParser()
+        _intent_parser = RegexIntentParser(
+    normalizer=normalizer
+)
     return _intent_parser
 
 
@@ -89,6 +106,7 @@ def get_llm_service() -> AbstractLLMService:
     if _llm_service is None:
         _llm_service = OllamaLLMService()
     return _llm_service
+
 
 
 def get_query_classifier(
