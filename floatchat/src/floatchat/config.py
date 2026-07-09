@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     gdac_base_url: str = "https://data-argo.ifremer.fr"
     metadata_index_path: str = "/argo_bio-profile_index.txt.gz"
     metadata_cache_ttl_hours: int = 24
+    enable_synthetic_index: bool = False
 
     # HTTP
     http_timeout: int = 30

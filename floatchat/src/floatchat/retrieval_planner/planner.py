@@ -12,12 +12,12 @@ from floatchat.variable_registry.registry import VariableRegistry
 
 @dataclass
 class RetrievalPlan:
-    """Result of the planning stage."""
+    """Result of the planning stage (Phase 22)."""
 
     variables: List[str]
-    metadata_index: str          # "bio" or "synthetic"
-    profile_type: str            # "B", "S", or "R"
-    requires_synthetic: bool
+    metadata_index: str          # "core", "bio", or "both"
+    profile_type: str            # "R", "B", or "both"
+    requires_core: bool
     requires_bio: bool
     reasoning: str
 
@@ -43,7 +43,7 @@ class RetrievalPlanner:
             variables=variables,
             metadata_index=classification["metadata_index"],
             profile_type=classification["profile_type"],
-            requires_synthetic=classification["strategy"] == "synthetic",
-            requires_bio=classification["strategy"] == "bio",
+            requires_core=classification["strategy"] in ("core", "both"),
+            requires_bio=classification["strategy"] in ("bio", "both"),
             reasoning=reasoning,
         )

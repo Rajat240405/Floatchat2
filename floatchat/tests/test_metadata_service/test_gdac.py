@@ -50,6 +50,35 @@ class TestGDACMetadataService:
         )
         return svc
 
+    def _make_service_with_core(self) -> GDACMetadataService:
+        svc = self._make_service()
+        svc._core_df = pd.DataFrame(
+            {
+                "file": [
+                    "coriolis/6903091/profiles/R6903091_001.nc",
+                    "coriolis/6903091/profiles/R6903091_002.nc",
+                ],
+                "date": pd.to_datetime(
+                    ["20240115120000", "20240220120000"],
+                    format="%Y%m%d%H%M%S",
+                    utc=True,
+                ),
+                "latitude": [10.5, 11.0],
+                "longitude": [65.2, 66.0],
+                "ocean": ["I", "I"],
+                "profiler_type": ["846", "846"],
+                "institution": ["IF", "IF"],
+                "parameters": ["", ""],
+                "parameter_data_mode": ["", ""],
+                "date_update": pd.to_datetime(
+                    ["20240116000000", "20240221000000"],
+                    format="%Y%m%d%H%M%S",
+                    utc=True,
+                ),
+            }
+        )
+        return svc
+
     def test_search_by_region(self) -> None:
         svc = self._make_service()
         criteria = SearchCriteria(region="arabian_sea", limit=10)
@@ -63,6 +92,13 @@ class TestGDACMetadataService:
         results = svc.search(criteria)
         assert len(results) == 2
         assert all("DOXY" in r.parameters for r in results)
+
+    def test_core_search_does_not_apply_bio_parameter_tokens(self) -> None:
+        svc = self._make_service_with_core()
+        criteria = SearchCriteria(region="arabian_sea", parameters=["TEMP"], limit=10)
+        results = svc.search(criteria)
+        assert len(results) == 2
+        assert all(r.file.startswith("coriolis/6903091/profiles/R") for r in results)
 
     def test_search_by_float_id(self) -> None:
         svc = self._make_service()

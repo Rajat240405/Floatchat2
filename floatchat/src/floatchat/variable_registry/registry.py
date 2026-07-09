@@ -1,6 +1,10 @@
-"""Centralized Variable Registry for FloatChat Phase 21.
+"""Centralized Variable Registry for FloatChat Phase 22.
 
-Follows Argo User Manual v3.44, R03 vocabulary, and the scientific audit.
+Updated per INCOIS scientific guidance:
+- Core variables → Core index
+- BGC variables → Bio index
+- Mixed queries → both indexes
+- Synthetic is now optional fallback only
 """
 
 from dataclasses import dataclass, field
@@ -17,8 +21,8 @@ class VariableDefinition:
     units: str
     aliases: List[str] = field(default_factory=list)
     abbreviations: List[str] = field(default_factory=list)
-    preferred_metadata_index: Literal["bio", "synthetic", "core"] = "synthetic"
-    preferred_profile_type: Literal["B", "S", "R"] = "S"
+    preferred_metadata_index: Literal["core", "bio", "synthetic"] = "core"
+    preferred_profile_type: Literal["R", "B", "S"] = "R"
     adjusted_name: Optional[str] = None
     qc_name: Optional[str] = None
     error_name: Optional[str] = None
@@ -37,8 +41,8 @@ class VariableRegistry:
             units="degree_Celsius",
             aliases=["temperature", "temp"],
             abbreviations=["temp"],
-            preferred_metadata_index="synthetic",
-            preferred_profile_type="S",
+            preferred_metadata_index="core",
+            preferred_profile_type="R",
             adjusted_name="TEMP_ADJUSTED",
             qc_name="TEMP_QC",
             error_name="TEMP_ADJUSTED_ERROR",
@@ -50,8 +54,8 @@ class VariableRegistry:
             units="psu",
             aliases=["salinity", "psal"],
             abbreviations=["psal"],
-            preferred_metadata_index="synthetic",
-            preferred_profile_type="S",
+            preferred_metadata_index="core",
+            preferred_profile_type="R",
             adjusted_name="PSAL_ADJUSTED",
             qc_name="PSAL_QC",
             error_name="PSAL_ADJUSTED_ERROR",
@@ -63,8 +67,8 @@ class VariableRegistry:
             units="dbar",
             aliases=["pressure", "pres"],
             abbreviations=["pres"],
-            preferred_metadata_index="synthetic",
-            preferred_profile_type="S",
+            preferred_metadata_index="core",
+            preferred_profile_type="R",
             adjusted_name="PRES_ADJUSTED",
             qc_name="PRES_QC",
             error_name="PRES_ADJUSTED_ERROR",
@@ -132,7 +136,7 @@ class VariableRegistry:
             qc_name="PH_IN_SITU_TOTAL_QC",
             error_name="PH_IN_SITU_TOTAL_ADJUSTED_ERROR",
         ),
-        # Intermediate variables (never satisfy core requests)
+        # Intermediate variables
         "TEMP_DOXY": VariableDefinition(
             canonical="TEMP_DOXY",
             category="intermediate",
@@ -146,12 +150,9 @@ class VariableRegistry:
 
     @classmethod
     def get(cls, name: str) -> Optional[VariableDefinition]:
-        """Return definition for canonical name or alias."""
         name = name.upper()
         if name in cls._REGISTRY:
             return cls._REGISTRY[name]
-
-        # Search aliases and abbreviations
         for var in cls._REGISTRY.values():
             if name in [a.upper() for a in var.aliases + var.abbreviations]:
                 return var
@@ -159,12 +160,9 @@ class VariableRegistry:
 
     @classmethod
     def classify_variables(cls, variables: List[str]) -> dict:
-        """Classify requested variables and decide retrieval strategy."""
         core_vars = []
         bgc_vars = []
         intermediates = []
-        requires_synthetic = False
-        requires_bio = False
 
         for v in variables:
             definition = cls.get(v)
@@ -172,29 +170,35 @@ class VariableRegistry:
                 continue
             if definition.category == "core":
                 core_vars.append(definition.canonical)
-                requires_synthetic = True
             elif definition.category == "bgc_primary":
                 bgc_vars.append(definition.canonical)
-                requires_bio = True
             elif definition.is_intermediate:
                 intermediates.append(definition.canonical)
 
-        strategy = "synthetic" if requires_synthetic else "bio"
-        if requires_synthetic and requires_bio:
-            strategy = "synthetic"  # mixed → synthetic is authoritative
+        if core_vars and bgc_vars:
+            strategy = "both"
+            metadata_index = "both"
+            profile_type = "both"
+        elif core_vars:
+            strategy = "core"
+            metadata_index = "core"
+            profile_type = "R"
+        else:
+            strategy = "bio"
+            metadata_index = "bio"
+            profile_type = "B"
 
         return {
             "core": core_vars,
             "bgc": bgc_vars,
             "intermediates": intermediates,
             "strategy": strategy,
-            "metadata_index": "synthetic" if requires_synthetic else "bio",
-            "profile_type": "S" if requires_synthetic else "B",
+            "metadata_index": metadata_index,
+            "profile_type": profile_type,
         }
 
     @classmethod
     def get_preferred_index(cls, variables: List[str]) -> str:
-        """Return the correct metadata index for the given variables."""
         classification = cls.classify_variables(variables)
         return classification["metadata_index"]
 

@@ -69,3 +69,61 @@ class TestQueryEngine:
         engine.repository.fetch.assert_called_once_with("a.nc")
         engine.reader.read.assert_called_once()
         engine.viz.render.assert_called_once()
+
+    def test_execute_mixed_core_bio_searches_and_reads_separately(self) -> None:
+        core_record = MetadataRecord(
+            file="coriolis/6903091/profiles/R6903091_001.nc",
+            date=datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            latitude=10.0,
+            longitude=65.0,
+            ocean="I",
+            profiler_type="x",
+            institution="IF",
+            parameters="",
+            parameter_data_mode="",
+            date_update=datetime(2024, 1, 2, 0, 0, 0, tzinfo=timezone.utc),
+        )
+        bio_record = MetadataRecord(
+            file="coriolis/6903091/profiles/BR6903091_001.nc",
+            date=datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            latitude=10.0,
+            longitude=65.0,
+            ocean="I",
+            profiler_type="x",
+            institution="IF",
+            parameters="PRES DOXY",
+            parameter_data_mode="R A",
+            date_update=datetime(2024, 1, 2, 0, 0, 0, tzinfo=timezone.utc),
+        )
+
+        metadata = MagicMock()
+        metadata.search.side_effect = [[core_record], [bio_record]]
+
+        repository = MagicMock()
+        core_ncd = MagicMock()
+        bio_ncd = MagicMock()
+        repository.fetch.side_effect = [core_ncd, bio_ncd]
+
+        reader = MagicMock()
+        reader.read.side_effect = [
+            pd.DataFrame({"profile_idx": [0], "level_idx": [0], "PRES": [10.0], "TEMP": [24.0]}),
+            pd.DataFrame({"profile_idx": [0], "level_idx": [0], "PRES": [10.0], "DOXY": [205.0]}),
+        ]
+
+        viz = MagicMock()
+        viz.render = MagicMock(return_value={"data": [1]})
+
+        engine = QueryEngine(metadata, repository, reader, viz)
+        intent = ParsedIntent(
+            intent="profile_plot",
+            variables=["TEMP", "DOXY"],
+            region="arabian_sea",
+        )
+        response = engine.execute(intent)
+
+        assert response.figure is not None
+        assert metadata.search.call_count == 2
+        assert metadata.search.call_args_list[0].args[0].parameters == ["TEMP"]
+        assert metadata.search.call_args_list[1].args[0].parameters == ["DOXY"]
+        reader.read.assert_any_call(core_ncd, ["TEMP"])
+        reader.read.assert_any_call(bio_ncd, ["DOXY"])

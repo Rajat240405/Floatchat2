@@ -26,6 +26,7 @@ from floatchat.scientific_explanation.verification import (
 )
 from floatchat.scientific_explanation.interpretation import generate_plot_interpretation
 from floatchat.retrieval_planner.planner import RetrievalPlanner
+from floatchat.variable_registry.registry import VariableRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,8 @@ class QueryEngine:
         # --- Step 1: Metadata search -------------------------------------- #
         t0 = time.perf_counter()
         criteria = self._intent_to_criteria(intent)
-        records = self.metadata.search(criteria)
+        search_groups = self._search_metadata_groups(intent, criteria, plan)
+        records = [record for group_records, _ in search_groups for record in group_records]
         t1 = time.perf_counter()
         logger.info("Metadata search: %.3fs (%d records)", t1 - t0, len(records))
 
@@ -93,23 +95,24 @@ class QueryEngine:
 
         # --- Step 2: Fetch & read NetCDFs --------------------------------- #
         dataframes: list[pd.DataFrame] = []
-        for rec in records:
-            float_id = _extract_float_id_from_path(rec.file)
-            ncd = self.repository.fetch(rec.file)
-            try:
-                df = self.reader.read(ncd, intent.variables)
-                # Augment with metadata for downstream use
-                df["source_file"] = rec.file
-                df["profile_date"] = rec.date
-                df["latitude"] = rec.latitude
-                df["longitude"] = rec.longitude
-                df["float_id"] = float_id
-                df["dac"] = rec.institution
-                dataframes.append(df)
-            except FloatChatError:
-                logger.exception("Failed to read %s; skipping", rec.file)
-            finally:
-                ncd.close()
+        for group_records, variables in search_groups:
+            for rec in group_records:
+                float_id = _extract_float_id_from_path(rec.file)
+                ncd = self.repository.fetch(rec.file)
+                try:
+                    df = self.reader.read(ncd, variables)
+                    # Augment with metadata for downstream use
+                    df["source_file"] = rec.file
+                    df["profile_date"] = rec.date
+                    df["latitude"] = rec.latitude
+                    df["longitude"] = rec.longitude
+                    df["float_id"] = float_id
+                    df["dac"] = rec.institution
+                    dataframes.append(df)
+                except FloatChatError:
+                    logger.exception("Failed to read %s; skipping", rec.file)
+                finally:
+                    ncd.close()
 
         t2 = time.perf_counter()
         logger.info("NetCDF fetch+read: %.3fs (%d profiles)", t2 - t1, len(records))
@@ -210,6 +213,31 @@ class QueryEngine:
             profile_number=intent.profile_number,
             limit=limit,
         )
+
+    def _search_metadata_groups(
+        self,
+        intent: ParsedIntent,
+        criteria: SearchCriteria,
+        plan,
+    ) -> list[tuple[list[Any], list[str]]]:
+        """Search metadata without intersecting Core and Bio indexes."""
+        if plan.metadata_index != "both":
+            return [(self.metadata.search(criteria), intent.variables)]
+
+        classification = VariableRegistry.classify_variables(intent.variables or [])
+        groups: list[tuple[list[Any], list[str]]] = []
+
+        core_vars = classification["core"]
+        if core_vars:
+            core_criteria = criteria.model_copy(update={"parameters": core_vars})
+            groups.append((self.metadata.search(core_criteria), core_vars))
+
+        bgc_vars = classification["bgc"]
+        if bgc_vars:
+            bio_criteria = criteria.model_copy(update={"parameters": bgc_vars})
+            groups.append((self.metadata.search(bio_criteria), bgc_vars))
+
+        return groups
 
     @staticmethod
     def _build_map_data(records: list[Any]) -> list[MapData]:
