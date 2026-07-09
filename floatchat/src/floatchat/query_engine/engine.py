@@ -40,6 +40,14 @@ def _extract_float_id_from_path(file_path: str) -> str:
     return match.group(1) if match else "unknown"
 
 
+def _extract_float_cycle_key(file_path: str) -> tuple[str, str]:
+    """Extract (float_id, cycle) key from a GDAC file path for pairing (Phase 24)."""
+    _cyc_re = re.compile(r"_(\d{3})\.nc")
+    fid = _FLOAT_ID_RE.search(file_path)
+    cyc = _cyc_re.search(file_path)
+    return (fid.group(1) if fid else "", cyc.group(1) if cyc else "")
+
+
 class QueryEngine:
     """Orchestrates the data retrieval and visualization pipeline."""
 
@@ -242,24 +250,107 @@ class QueryEngine:
         criteria: SearchCriteria,
         plan,
     ) -> list[tuple[list[Any], list[str]]]:
-        """Search metadata without intersecting Core and Bio indexes."""
+        """Search metadata without intersecting Core and Bio indexes.
+
+        Phase 24: For mixed queries, prefers records from the same float+cycle
+        before returning independent observations.
+        """
         if plan.metadata_index != "both":
             return [(self.metadata.search(criteria), intent.variables)]
 
         classification = VariableRegistry.classify_variables(intent.variables or [])
-        groups: list[tuple[list[Any], list[str]]] = []
 
         core_vars = classification["core"]
-        if core_vars:
-            core_criteria = criteria.model_copy(update={"parameters": core_vars})
-            groups.append((self.metadata.search(core_criteria), core_vars))
-
         bgc_vars = classification["bgc"]
+
+        # Request more records than needed so we have candidates for pairing.
+        pair_limit = max(criteria.limit, 10)
+        core_records: list[Any] = []
+        bio_records: list[Any] = []
+        if core_vars:
+            core_criteria = criteria.model_copy(
+                update={"parameters": core_vars, "limit": pair_limit}
+            )
+            core_records = self.metadata.search(core_criteria)
         if bgc_vars:
-            bio_criteria = criteria.model_copy(update={"parameters": bgc_vars})
-            groups.append((self.metadata.search(bio_criteria), bgc_vars))
+            bio_criteria = criteria.model_copy(
+                update={"parameters": bgc_vars, "limit": pair_limit}
+            )
+            bio_records = self.metadata.search(bio_criteria)
+
+        # --- Phase 24: Pair by (float_id, cycle) when both groups exist --- #
+        if core_records and bio_records:
+            core_records, bio_records = self._pair_by_float_cycle(
+                core_records, bio_records, criteria.limit
+            )
+
+        groups: list[tuple[list[Any], list[str]]] = []
+        if core_records and core_vars:
+            groups.append((core_records, core_vars))
+        if bio_records and bgc_vars:
+            groups.append((bio_records, bgc_vars))
 
         return groups
+
+    @staticmethod
+    def _pair_by_float_cycle(
+        core_records: list[Any],
+        bio_records: list[Any],
+        limit: int,
+    ) -> tuple[list[Any], list[Any]]:
+        """Phase 24: Reorder records so pairs from the same float+cycle come first.
+
+        Falls back to independent retrieval when no pairs exist.
+        """
+        # Build lookup: key → list of records
+        core_by_key: dict[tuple[str, str], list[Any]] = {}
+        for r in core_records:
+            key = _extract_float_cycle_key(r.file)
+            core_by_key.setdefault(key, []).append(r)
+
+        bio_by_key: dict[tuple[str, str], list[Any]] = {}
+        for r in bio_records:
+            key = _extract_float_cycle_key(r.file)
+            bio_by_key.setdefault(key, []).append(r)
+
+        # Keys present in both indexes = paired floats
+        paired_keys = set(core_by_key) & set(bio_by_key)
+
+        if not paired_keys:
+            return core_records[:limit], bio_records[:limit]
+
+        # Collect paired records first
+        paired_core: list[Any] = []
+        paired_bio: list[Any] = []
+        for key in sorted(paired_keys):
+            paired_core.extend(core_by_key[key])
+            paired_bio.extend(bio_by_key[key])
+
+        # Then unpaired (fallback)
+        unpaired_core: list[Any] = []
+        for key in sorted(set(core_by_key) - paired_keys):
+            unpaired_core.extend(core_by_key[key])
+        unpaired_bio: list[Any] = []
+        for key in sorted(set(bio_by_key) - paired_keys):
+            unpaired_bio.extend(bio_by_key[key])
+
+        # Sort all groups by date (newest first) within paired/unpaired
+        sort_key = lambda r: r.date
+        paired_core.sort(key=sort_key, reverse=True)
+        paired_bio.sort(key=sort_key, reverse=True)
+        unpaired_core.sort(key=sort_key, reverse=True)
+        unpaired_bio.sort(key=sort_key, reverse=True)
+
+        # Prefer paired, cap at limit
+        best_core = paired_core + unpaired_core
+        best_bio = paired_bio + unpaired_bio
+
+        logger.info(
+            "Phase 24 pairing: %d paired floats, returning %d core + %d bio records",
+            len(paired_keys), min(len(best_core), limit), min(len(best_bio), limit),
+        )
+
+        return best_core[:limit], best_bio[:limit]
 
     @staticmethod
     def _build_map_data(records: list[Any]) -> list[MapData]:

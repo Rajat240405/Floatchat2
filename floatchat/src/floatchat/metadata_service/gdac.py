@@ -286,7 +286,22 @@ class GDACMetadataService(AbstractMetadataService):
             df = df[mask]
 
         # --- Sort & limit ------------------------------------------------- #
-        df = df.sort_values("date", ascending=False).head(criteria.limit)
+        # Phase 24: Quality-aware ranking — prefer delayed-mode, newest,
+        # and most-complete profiles.
+        _mode_rank = {"D": 0, "A": 1, "R": 2}
+
+        def _quality_key(row):
+            modes = str(row.get("parameter_data_mode", "")).split()
+            best_mode = min((_mode_rank.get(m, 3) for m in modes), default=3)
+            n_params = len(str(row.get("parameters", "")).split())
+            newest = row["date"].timestamp() if pd.notna(row["date"]) else 0
+            return (best_mode, -newest, -n_params)
+
+        # Compute quality scores and sort
+        df = df.copy()
+        df["_quality"] = df.apply(_quality_key, axis=1)
+        df = df.sort_values("_quality", ascending=True).drop(columns=["_quality"])
+        df = df.head(criteria.limit)
         logger.info("%s metadata search returned %d records", metadata_index, len(df))
 
         return [MetadataRecord(**row) for row in df.to_dict("records")]
