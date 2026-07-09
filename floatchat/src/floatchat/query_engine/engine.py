@@ -25,6 +25,7 @@ from floatchat.scientific_explanation.verification import (
     build_pipeline_trace,
 )
 from floatchat.scientific_explanation.interpretation import generate_plot_interpretation
+from floatchat.retrieval_planner.planner import RetrievalPlanner
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class QueryEngine:
         self.reader = netcdf_reader
         self.viz = visualization_engine
         self.explanation_engine = ScientificExplanationEngine()
+        self.planner = RetrievalPlanner()
 
     def execute(self, intent: ParsedIntent) -> ChatResponse:
         """Run the full pipeline for a single parsed intent.
@@ -65,6 +67,10 @@ class QueryEngine:
         """
         pipeline_t0 = time.perf_counter()
         logger.info("Executing intent: %s", intent.intent)
+
+        # --- Phase 21: Retrieval Planning --------------------------------- #
+        plan = self.planner.plan(intent.variables or [])
+        logger.info("Retrieval Plan: %s", plan.reasoning)
 
         # --- Step 1: Metadata search -------------------------------------- #
         t0 = time.perf_counter()

@@ -18,6 +18,8 @@ from floatchat.exceptions import MetadataError
 from floatchat.metadata_service.base import AbstractMetadataService
 from floatchat.metadata_service.regions import has_polygon, point_in_region, resolve_region
 from floatchat.models import MetadataRecord, SearchCriteria
+from floatchat.variable_registry.registry import VariableRegistry
+from floatchat.retrieval_planner.planner import RetrievalPlanner
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ _INDEX_COLUMNS = [
 # Local cache path (relative to working directory or env override).
 _CACHE_DIR = Path(os.environ.get("FLOATCHAT_CACHE_DIR", ".cache"))
 _CACHE_FILE = _CACHE_DIR / "argo_bio-profile_index.txt.gz"
+_SYNTHETIC_CACHE_FILE = _CACHE_DIR / "argo_synthetic-profile_index.txt.gz"
 
 
 def _parse_argo_timestamp(val: str) -> datetime:
@@ -47,33 +50,50 @@ def _parse_argo_timestamp(val: str) -> datetime:
 
 
 class GDACMetadataService(AbstractMetadataService):
-    """Metadata service backed by the Ifremer GDAC."""
+    """Metadata service backed by the Ifremer GDAC.
+
+    Phase 21: Supports both bio and synthetic indexes and uses
+    the RetrievalPlanner + VariableRegistry for correct routing.
+    """
 
     def __init__(self) -> None:
-        self._df: pd.DataFrame | None = None
+        self._df: pd.DataFrame | None = None          # bio index
+        self._synthetic_df: pd.DataFrame | None = None  # synthetic index
         self._last_load: datetime | None = None
+        self.planner = RetrievalPlanner()
 
     # --------------------------------------------------------------------- #
     # Public API
     # --------------------------------------------------------------------- #
 
     def load(self) -> None:
-        """Ensure the index is downloaded and loaded into RAM."""
+        """Ensure both bio and synthetic indexes are loaded."""
         if self._is_cache_fresh():
-            logger.info("Loading metadata index from local cache: %s", _CACHE_FILE)
-            self._load_from_file(_CACHE_FILE)
+            logger.info("Loading metadata indexes from local cache")
+            self._load_from_file(_CACHE_FILE, is_synthetic=False)
+            self._load_from_file(_SYNTHETIC_CACHE_FILE, is_synthetic=True)
             return
 
-        logger.info("Downloading metadata index from GDAC ...")
+        logger.info("Downloading metadata indexes from GDAC ...")
         self._download_index()
-        self._load_from_file(_CACHE_FILE)
+        self._download_synthetic_index()
+        self._load_from_file(_CACHE_FILE, is_synthetic=False)
+        self._load_from_file(_SYNTHETIC_CACHE_FILE, is_synthetic=True)
 
     def search(self, criteria: SearchCriteria) -> list[MetadataRecord]:
         """Filter the in-memory index according to *criteria*."""
         if self._df is None:
             raise MetadataError("Metadata index not loaded. Call load() first.")
 
-        df = self._df
+        # Phase 21: Planning happens once at the beginning
+        plan = self.planner.plan(criteria.parameters or [])
+        if plan.metadata_index == "synthetic" and self._synthetic_df is not None:
+            df = self._synthetic_df
+            logger.info("RetrievalPlanner selected synthetic index")
+        else:
+            df = self._df
+            logger.info("RetrievalPlanner selected bio index")
+
         logger.debug("Starting search on %d rows", len(df))
 
         # --- Region / bounding box ---------------------------------------- #
@@ -127,12 +147,18 @@ class GDACMetadataService(AbstractMetadataService):
             profile_pattern = f"_{criteria.profile_number:03d}.nc"
             df = df[df["file"].str.contains(profile_pattern, regex=False, na=False)]
 
-        # --- Parameters (AND logic) --------------------------------------- #
+        # --- Phase 21: Exact parameter matching (token-based) ------------ #
         if criteria.parameters:
-            # Vectorized string contains (C-level) instead of Python .apply().
+            # Use the plan already computed at the top of search()
+            if plan.metadata_index == "synthetic" and self._synthetic_df is not None:
+                df = self._synthetic_df
+
+            # Exact token matching (not substring)
             mask = pd.Series(True, index=df.index)
             for param in criteria.parameters:
-                mask &= df["parameters"].str.contains(param, regex=False, na=False)
+                mask &= df["parameters"].apply(
+                    lambda x: param in str(x).split() if pd.notna(x) else False
+                )
             df = df[mask]
 
         # --- Sort & limit ------------------------------------------------- #
@@ -175,10 +201,27 @@ class GDACMetadataService(AbstractMetadataService):
         _CACHE_FILE.write_bytes(response.content)
         logger.info("Wrote metadata cache (%d bytes)", len(response.content))
 
-    def _load_from_file(self, path: Path) -> None:
+    def _download_synthetic_index(self) -> None:
+        """Download the synthetic profile index."""
+        synthetic_url = f"{settings.gdac_base_url}/argo_synthetic-profile_index.txt.gz"
         try:
-            # Argo index files have comment lines starting with '#'.
-            # The first non-comment line is the CSV header.
+            limits = httpx.Limits(
+                max_connections=settings.http_max_connections,
+                max_keepalive_connections=settings.http_max_keepalive,
+            )
+            with httpx.Client(timeout=settings.http_timeout, limits=limits) as client:
+                response = client.get(synthetic_url)
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("Failed to download synthetic index: %s", exc)
+            return
+
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _SYNTHETIC_CACHE_FILE.write_bytes(response.content)
+        logger.info("Wrote synthetic metadata cache (%d bytes)", len(response.content))
+
+    def _load_from_file(self, path: Path, is_synthetic: bool = False) -> None:
+        try:
             df = pd.read_csv(
                 path,
                 comment="#",
@@ -200,17 +243,18 @@ class GDACMetadataService(AbstractMetadataService):
                 details={"exception": str(exc)},
             ) from exc
 
-        # Coerce coordinate columns to numeric (invalid values become NaN)
         df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
         df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
 
-        # Coerce timestamp columns to datetime
         for col in ("date", "date_update"):
             df[col] = pd.to_datetime(df[col], format="%Y%m%d%H%M%S", errors="coerce", utc=True)
 
-        # Drop rows with unparseable coordinates or dates (usually header/footer artifacts)
         df = df.dropna(subset=["date", "latitude", "longitude"]).reset_index(drop=True)
 
-        self._df = df
-        self._last_load = datetime.now(timezone.utc)
-        logger.info("Loaded metadata index: %d rows", len(df))
+        if is_synthetic:
+            self._synthetic_df = df
+            logger.info("Loaded synthetic metadata index: %d rows", len(df))
+        else:
+            self._df = df
+            self._last_load = datetime.now(timezone.utc)
+            logger.info("Loaded bio metadata index: %d rows", len(df))
