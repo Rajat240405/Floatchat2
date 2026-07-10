@@ -8,6 +8,7 @@ and scientific accuracy.
 """
 
 from typing import Any, Dict, List, Optional
+import logging
 import math
 import pandas as pd
 import numpy as np
@@ -15,6 +16,8 @@ import numpy as np
 from ..models.intent import ParsedIntent
 from ..models.metadata import MetadataRecord
 from .reasoning import get_scientific_reasoning
+
+logger = logging.getLogger(__name__)
 
 
 class ScientificExplanationEngine:
@@ -328,5 +331,35 @@ class ScientificExplanationEngine:
         df: Optional[pd.DataFrame] = None,
     ) -> str:
         if df is not None and not df.empty:
+            # --- Phase 26 Step 2: Shadow-mode ScientificFacts extraction ---
+            # Run new ScientificFeatureExtractor in parallel, compare to legacy,
+            # but keep legacy explanation as authoritative until LLM path validated.
+            try:
+                # Lazy import to avoid circular dependency (features imports engine)
+                if not hasattr(self, "_feature_extractor"):
+                    from .features import ScientificFeatureExtractor  # type: ignore
+                    self._feature_extractor = ScientificFeatureExtractor(use_legacy=True)
+                    logger.info("ScientificFeatureExtractor initialized (shadow mode)")
+
+                extractor = getattr(self, "_feature_extractor", None)
+                if extractor is not None:
+                    comparison = extractor.compare_with_legacy(df, variables, intent, records)
+                    if comparison.get("match"):
+                        logger.info(
+                            "Shadow ScientificFacts OK: vars=%s features=%d payload=%d bytes",
+                            comparison.get("facts_vars"),
+                            comparison.get("facts_features"),
+                            comparison.get("payload_bytes", 0),
+                        )
+                    else:
+                        logger.warning(
+                            "Shadow ScientificFacts mismatch: %s",
+                            comparison.get("differences"),
+                        )
+            except Exception as e:
+                # Shadow mode must NEVER break the production path
+                logger.warning("Shadow ScientificFacts extraction failed (non-fatal): %s", e, exc_info=True)
+
+            # Legacy path remains authoritative in Step 2
             return self._generate_data_driven_explanation(intent, records, variables, df)
         return self._generate_kb_explanation(intent, records, variables, data_summary)

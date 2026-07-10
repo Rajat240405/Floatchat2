@@ -39,6 +39,19 @@ class Settings(BaseSettings):
     ollama_timeout: float = 60.0
     ollama_classifier_timeout: float = 10.0
 
+    # Scientific Narrator – LLM-driven explanation (Phase 26+)
+    sci_narrator_enabled: bool = True
+    sci_narrator_model: str = "qwen3:8b"
+    sci_narrator_temperature: float = 0.25
+    sci_narrator_top_p: float = 0.9
+    sci_narrator_timeout: float = 8.0
+    sci_narrator_max_retries: int = 1
+    sci_narrator_thinking: bool = False  # Qwen3 – disable /no_think for fast narration
+    sci_narrator_max_tokens: int = 450
+    sci_narrator_max_payload_bytes: int = 4096  # configurable ScientificFacts JSON cap
+    sci_narrator_prompt_version: str = "sci_narrator_v1_2026-07"
+    sci_narrator_fallback: str = "template"  # template | kb
+
     # Logging
     log_level: str = "INFO"
 
