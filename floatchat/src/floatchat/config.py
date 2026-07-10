@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     # Query limits
     max_profiles_per_query: int = 5
+    deployment_mode: str = "GLOBAL"  # Options: "GLOBAL", "INDIA_ONLY"
 
     # Conversation memory
     conversation_max_turns: int = 10
@@ -34,7 +35,7 @@ class Settings(BaseSettings):
     # LLM / Ollama
     llm_enabled: bool = True
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen2.5:7b"
+    ollama_model: str = "qwen2.5:7b "
     ollama_timeout: float = 60.0
     ollama_classifier_timeout: float = 10.0
 

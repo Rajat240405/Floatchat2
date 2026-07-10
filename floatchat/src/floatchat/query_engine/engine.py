@@ -75,6 +75,18 @@ class QueryEngine:
             A :class:`ChatResponse` containing the figure and summary.
         """
         pipeline_t0 = time.perf_counter()
+
+        # --- Phase 26: India-only Deployment Gate --- #
+        if settings.deployment_mode == "INDIA_ONLY":
+            supported_india_regions = {"arabian_sea", "bay_of_bengal"}
+            if intent.region and intent.region not in supported_india_regions:
+                return ChatResponse(
+                    intent=intent.intent,
+                    message=f"Region '{intent.region}' is not supported in the current deployment mode. "
+                            f"Please request data for the Arabian Sea or Bay of Bengal.",
+                    data_summary={"matched_records": 0},
+                )
+
         logger.info("Executing intent: %s", intent.intent)
 
         # --- Phase 21: Retrieval Planning --------------------------------- #
@@ -91,77 +103,12 @@ class QueryEngine:
 
         if not records:
             logger.warning("No metadata records matched criteria: %s", criteria)
-            # TEMP DEBUG: remove after Phase 25 stabilization.
-            # Emits ONE structured line per zero-record request so we can tell
-            # in production whether the failure is caused by stale conversation
-            # state (float_id / profile_number / year), a legitimate zero-hit
-            # query, or a third unknown cause. Behaviour is unchanged.
-            logger.warning(
-                "PHASE25_ZERO_RECORDS intent=%s variables=%s region=%s float_id=%s "
-                "profile_number=%s year=%s metadata_index=%s requires_core=%s "
-                "requires_bio=%s planner_reasoning=%r",
-                intent.intent,
-                intent.variables,
-                intent.region,
-                intent.float_id,
-                intent.profile_number,
-                intent.year,
-                plan.metadata_index,
-                plan.requires_core,
-                plan.requires_bio,
-                plan.reasoning,
+            suggestion = self._get_error_suggestion(intent)
+            return ChatResponse(
+                intent=intent.intent,
+                message=f"No Argo profiles matched your query criteria. {suggestion}",
+                data_summary={"matched_records": 0},
             )
-
-            # Year-constraint relaxation: if a year was set (possibly from stale
-            # conversation context) and it returned 0 results, retry without the
-            # year filter so the user sees actual data with a clear note.
-            if criteria.year is not None:
-                logger.info(
-                    "Year=%d returned 0 records; retrying without year constraint", criteria.year
-                )
-                relaxed_intent = intent.model_copy(update={"year": None})
-                relaxed_criteria = self._intent_to_criteria(relaxed_intent)
-                relaxed_groups = self._search_metadata_groups(
-                    relaxed_intent, relaxed_criteria, plan
-                )
-                relaxed_records = [
-                    record for group_records, _ in relaxed_groups for record in group_records
-                ]
-                if relaxed_records:
-                    logger.info(
-                        "Year-relaxed search returned %d records; proceeding with note",
-                        len(relaxed_records),
-                    )
-                    # Capture original year BEFORE rebinding intent
-                    _original_year = criteria.year
-                    # Re-bind intent/criteria/records to the relaxed versions and
-                    # add a note that the year constraint was dropped.
-                    intent = relaxed_intent
-                    criteria = relaxed_criteria
-                    search_groups = relaxed_groups
-                    records = relaxed_records
-                    _year_note = (
-                        f"\n\n> **Note**: No data was found for year {_original_year}. "
-                        "Showing the most recent available profiles instead."
-                    )
-                else:
-                    suggestion = self._get_error_suggestion(intent)
-                    return ChatResponse(
-                        intent=intent.intent,
-                        message=f"No Argo profiles matched your query criteria. {suggestion}",
-                        data_summary={"matched_records": 0},
-                    )
-            else:
-                suggestion = self._get_error_suggestion(intent)
-                return ChatResponse(
-                    intent=intent.intent,
-                    message=f"No Argo profiles matched your query criteria. {suggestion}",
-                    data_summary={"matched_records": 0},
-                )
-        else:
-            _year_note = ""
-
-
 
         # Build map_data from metadata records (no extra backend calls)
         map_data = self._build_map_data(records)
@@ -252,16 +199,7 @@ class QueryEngine:
         explanation = self.explanation_engine.generate_explanation(
             intent, records, intent.variables, self._build_summary(combined, records), df=combined
         )
-
-        # Wire the plot interpretation module (was imported but never called).
-        # generate_plot_interpretation does numerically rigorous feature detection
-        # (thermocline, OMZ, DCM) directly from the DataFrame.
-        plot_interp = generate_plot_interpretation(combined, intent.variables, intent.region)
-        _TRIVIAL_INTERP = "Vertical profiles show the expected structure for this region."
-        if plot_interp and plot_interp.strip() != _TRIVIAL_INTERP:
-            final_message = f"{base_message}\n\n{explanation}\n\nPlot Interpretation\n{plot_interp}{_year_note}"
-        else:
-            final_message = f"{base_message}\n\n{explanation}{_year_note}"
+        final_message = f"{base_message}\n\n{explanation}"
 
         data_summary = self._build_summary(combined, records)
         data_summary.update(
@@ -269,6 +207,7 @@ class QueryEngine:
                 "verification": verification,
                 "pipeline_trace": pipeline_trace,
                 "suggestions": self._generate_suggestions(intent, records),
+                "derived_insights": self._calculate_derived_insights(combined, intent.variables),
             }
         )
 
@@ -509,6 +448,9 @@ class QueryEngine:
             suggestions = ["View oxygen", "Show salinity profile", "Compare with 2023"]
         return suggestions[:4]
 
-    # _calculate_derived_insights was removed — it was a deprecated stub that
-    # always returned {} and was no longer called from data_summary.update().
-    # Statistical computation is handled by ScientificExplanationEngine._compute_stats().
+    @staticmethod
+    def _calculate_derived_insights(
+        df: pd.DataFrame, variables: list[str]
+    ) -> dict[str, Any]:
+        """Deprecated: Use ScientificExplanationEngine._compute_stats instead."""
+        return {}
