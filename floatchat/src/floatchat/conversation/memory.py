@@ -45,18 +45,48 @@ class InMemoryConversationManager(AbstractConversationManager):
 
         merged_data = intent.model_dump()
 
+        # Identity filters (float_id, profile_number/cycle) are NOT
+        # conversational context; they narrow the search to a specific
+        # observation. Inheriting them into a new turn that isn't explicitly
+        # asking about the same identity silently converts a region query into
+        # a float/cycle query and typically returns 0 records — the
+        # intermittent "No Argo profiles matched" bug. Two guards:
+        #
+        #   Guard A — a region-scoped follow-up (named region or lat/lon bbox)
+        #     never inherits float_id or profile_number. Example:
+        #       Turn N   : "float 7902250 oxygen"     -> ctx.last_float_id set
+        #       Turn N+1 : "oxygen in Arabian Sea"    -> would inherit float_id
+        #
+        #   Guard B — profile_number is never inherited unless the merged
+        #     intent also has a float_id. A cycle number without a float is
+        #     meaningless: the metadata filter matches file basenames like
+        #     "_052.nc" across ALL floats, which almost always yields 0.
+        _has_region_scope = (
+            merged_data.get("region") is not None
+            or merged_data.get("lat_min") is not None
+            or merged_data.get("lat_max") is not None
+            or merged_data.get("lon_min") is not None
+            or merged_data.get("lon_max") is not None
+        )
+
         # Fill missing fields from context
         if not merged_data.get("variables") and ctx.last_variables:
             merged_data["variables"] = ctx.last_variables.copy()
         if merged_data.get("region") is None and ctx.last_region is not None:
             merged_data["region"] = ctx.last_region
-        if merged_data.get("float_id") is None and ctx.last_float_id is not None:
+        if (
+            merged_data.get("float_id") is None
+            and ctx.last_float_id is not None
+            and not _has_region_scope
+        ):
             merged_data["float_id"] = ctx.last_float_id
         if merged_data.get("year") is None and ctx.last_year is not None:
             merged_data["year"] = ctx.last_year
         if (
             merged_data.get("profile_number") is None
             and ctx.last_profile_number is not None
+            and not _has_region_scope
+            and merged_data.get("float_id") is not None
         ):
             merged_data["profile_number"] = ctx.last_profile_number
 

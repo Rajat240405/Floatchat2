@@ -91,6 +91,26 @@ class QueryEngine:
 
         if not records:
             logger.warning("No metadata records matched criteria: %s", criteria)
+            # TEMP DEBUG: remove after Phase 25 stabilization.
+            # Emits ONE structured line per zero-record request so we can tell
+            # in production whether the failure is caused by stale conversation
+            # state (float_id / profile_number / year), a legitimate zero-hit
+            # query, or a third unknown cause. Behaviour is unchanged.
+            logger.warning(
+                "PHASE25_ZERO_RECORDS intent=%s variables=%s region=%s float_id=%s "
+                "profile_number=%s year=%s metadata_index=%s requires_core=%s "
+                "requires_bio=%s planner_reasoning=%r",
+                intent.intent,
+                intent.variables,
+                intent.region,
+                intent.float_id,
+                intent.profile_number,
+                intent.year,
+                plan.metadata_index,
+                plan.requires_core,
+                plan.requires_bio,
+                plan.reasoning,
+            )
 
             # Year-constraint relaxation: if a year was set (possibly from stale
             # conversation context) and it returned 0 results, retry without the
