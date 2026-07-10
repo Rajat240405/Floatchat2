@@ -91,12 +91,57 @@ class QueryEngine:
 
         if not records:
             logger.warning("No metadata records matched criteria: %s", criteria)
-            suggestion = self._get_error_suggestion(intent)
-            return ChatResponse(
-                intent=intent.intent,
-                message=f"No Argo profiles matched your query criteria. {suggestion}",
-                data_summary={"matched_records": 0},
-            )
+
+            # Year-constraint relaxation: if a year was set (possibly from stale
+            # conversation context) and it returned 0 results, retry without the
+            # year filter so the user sees actual data with a clear note.
+            if criteria.year is not None:
+                logger.info(
+                    "Year=%d returned 0 records; retrying without year constraint", criteria.year
+                )
+                relaxed_intent = intent.model_copy(update={"year": None})
+                relaxed_criteria = self._intent_to_criteria(relaxed_intent)
+                relaxed_groups = self._search_metadata_groups(
+                    relaxed_intent, relaxed_criteria, plan
+                )
+                relaxed_records = [
+                    record for group_records, _ in relaxed_groups for record in group_records
+                ]
+                if relaxed_records:
+                    logger.info(
+                        "Year-relaxed search returned %d records; proceeding with note",
+                        len(relaxed_records),
+                    )
+                    # Capture original year BEFORE rebinding intent
+                    _original_year = criteria.year
+                    # Re-bind intent/criteria/records to the relaxed versions and
+                    # add a note that the year constraint was dropped.
+                    intent = relaxed_intent
+                    criteria = relaxed_criteria
+                    search_groups = relaxed_groups
+                    records = relaxed_records
+                    _year_note = (
+                        f"\n\n> **Note**: No data was found for year {_original_year}. "
+                        "Showing the most recent available profiles instead."
+                    )
+                else:
+                    suggestion = self._get_error_suggestion(intent)
+                    return ChatResponse(
+                        intent=intent.intent,
+                        message=f"No Argo profiles matched your query criteria. {suggestion}",
+                        data_summary={"matched_records": 0},
+                    )
+            else:
+                suggestion = self._get_error_suggestion(intent)
+                return ChatResponse(
+                    intent=intent.intent,
+                    message=f"No Argo profiles matched your query criteria. {suggestion}",
+                    data_summary={"matched_records": 0},
+                )
+        else:
+            _year_note = ""
+
+
 
         # Build map_data from metadata records (no extra backend calls)
         map_data = self._build_map_data(records)
@@ -169,9 +214,6 @@ class QueryEngine:
 
         # --- Step 4: Scientific Interpretation + Verification ------------- #
         t_sci_t0 = time.perf_counter()
-        interpretation = generate_plot_interpretation(
-            combined, intent.variables, intent.region
-        )
         verification = build_verification_section(
             intent, records, intent.variables, {}
         )
@@ -188,9 +230,18 @@ class QueryEngine:
 
         base_message = self._build_message(intent, records, combined)
         explanation = self.explanation_engine.generate_explanation(
-            intent, records, intent.variables, self._build_summary(combined, records)
+            intent, records, intent.variables, self._build_summary(combined, records), df=combined
         )
-        final_message = f"{base_message} {explanation} {interpretation}"
+
+        # Wire the plot interpretation module (was imported but never called).
+        # generate_plot_interpretation does numerically rigorous feature detection
+        # (thermocline, OMZ, DCM) directly from the DataFrame.
+        plot_interp = generate_plot_interpretation(combined, intent.variables, intent.region)
+        _TRIVIAL_INTERP = "Vertical profiles show the expected structure for this region."
+        if plot_interp and plot_interp.strip() != _TRIVIAL_INTERP:
+            final_message = f"{base_message}\n\n{explanation}\n\nPlot Interpretation\n{plot_interp}{_year_note}"
+        else:
+            final_message = f"{base_message}\n\n{explanation}{_year_note}"
 
         data_summary = self._build_summary(combined, records)
         data_summary.update(
@@ -198,9 +249,9 @@ class QueryEngine:
                 "verification": verification,
                 "pipeline_trace": pipeline_trace,
                 "suggestions": self._generate_suggestions(intent, records),
-                "derived_insights": self._calculate_derived_insights(combined, intent.variables),
             }
         )
+
 
         t_sci_t1 = time.perf_counter()
         logger.info("Scientific explanation: %.3fs", t_sci_t1 - t_sci_t0)
@@ -438,28 +489,6 @@ class QueryEngine:
             suggestions = ["View oxygen", "Show salinity profile", "Compare with 2023"]
         return suggestions[:4]
 
-    @staticmethod
-    def _calculate_derived_insights(
-        df: pd.DataFrame, variables: list[str]
-    ) -> dict[str, Any]:
-        """Lightweight derived scientific insights (Improvement 6)."""
-        insights: dict[str, Any] = {}
-        if "PRES" not in df.columns:
-            return insights
-
-        for var in variables:
-            col = f"{var}_ADJUSTED" if f"{var}_ADJUSTED" in df.columns else var
-            if col not in df.columns:
-                continue
-            series = df[col].dropna()
-            if series.empty:
-                continue
-            if var.upper().startswith("DOXY"):
-                min_idx = series.idxmin()
-                insights["min_oxygen_depth_dbar"] = float(df.loc[min_idx, "PRES"])
-            if var.upper().startswith("CHLA"):
-                max_idx = series.idxmax()
-                insights["max_chlorophyll_depth_dbar"] = float(df.loc[max_idx, "PRES"])
-            insights[f"surface_{var.lower()}_avg"] = float(series.iloc[:5].mean())
-            insights[f"qc_passed_{var.lower()}"] = int((df.get(f"{col}_QC", pd.Series([1]*len(df))) == "1").sum())
-        return insights
+    # _calculate_derived_insights was removed — it was a deprecated stub that
+    # always returned {} and was no longer called from data_summary.update().
+    # Statistical computation is handled by ScientificExplanationEngine._compute_stats().

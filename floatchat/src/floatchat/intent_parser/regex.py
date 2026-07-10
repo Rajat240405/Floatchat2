@@ -134,7 +134,7 @@ _INTENT_COMP = re.compile(r"\b(compar|vs\.?|versus|difference|diff|against)\b", 
 # These match natural follow-up phrases that may not contain explicit
 # variables or regions.  They signal intent type so context can fill gaps.
 _CONVERSATIONAL_VARIABLE = re.compile(
-    r"\b(actually|instead|now)\b.*?(oxygen|dissolved oxygen|doxy|o2|"
+    r"\b(actually|instead|now|what about|how about|and)\b.*?(oxygen|dissolved oxygen|doxy|o2|"
     r"chlorophyll|chlorophyll-a|chla|chlorophyll a|"
     r"backscattering|bbp700|particle backscattering|backscatter|"
     r"nitrate|no3|ph|acidity|ph in situ total|"

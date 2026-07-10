@@ -3,13 +3,20 @@
 import httpx
 import pytest
 import respx
+from pathlib import Path
 from httpx import Response
 
 from floatchat.exceptions import RepositoryError
+from floatchat.repository_service import gdac_http as gdac_service
 from floatchat.repository_service.gdac_http import GDACRepositoryService
 
 
 class TestGDACRepositoryService:
+    @pytest.fixture(autouse=True)
+    def isolate_cache(self, tmp_path, monkeypatch):
+        """Ensure each test uses a fresh temporary cache directory."""
+        monkeypatch.setattr(gdac_service, "_NETCDF_CACHE_DIR", tmp_path / "netcdf")
+
     @respx.mock
     def test_fetch_success(self, sample_netcdf_dataset) -> None:
         # Re-use the bytes from the fixture to mock the HTTP response

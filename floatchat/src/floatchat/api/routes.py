@@ -215,6 +215,20 @@ def chat(
             "Query classified as %s in %.3fs", query_type, classify_t1 - classify_t0
         )
 
+        # --- Step 1.5: Conversational Override -------------------------- #
+        # If the classifier says GENERAL_QUERY but it looks like a data follow-up,
+        # override to DATA_QUERY to trigger the retrieval pipeline.
+        if query_type == "GENERAL_QUERY":
+            # We use the parser to check if it's a conversational data request
+            try:
+                # Use a temporary parser to check for follow-up markers
+                # without committing to the final parsed intent yet.
+                if intent_parser._is_conversational_follow_up(request.message.lower()):
+                    logger.info("Overriding GENERAL_QUERY to DATA_QUERY due to follow-up pattern")
+                    query_type = "DATA_QUERY"
+            except Exception:
+                pass
+
         # --- Step 2: GENERAL_QUERY — LLM answer only -------------------- #
         if query_type == "GENERAL_QUERY":
             gen_t0 = time.perf_counter()
